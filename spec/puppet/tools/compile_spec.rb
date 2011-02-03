@@ -97,6 +97,12 @@ describe Puppet::Tools::Compile do
       it 'should return [] when noting matches' do
         get_all_nodes('fuj').should =~ []
       end
+      it 'should be able to match nodes using glob' do
+        ['foo.three.yaml', 'foo.foo.baz.yaml', 'blah.foo.bladdy.yaml', 'four.yaml'].each do |fn|
+          FileUtils.touch("#{@yamldir}/node/#{fn}")
+        end
+        match_nodes('*.foo.*', 'node').should =~ ["blah.foo.bladdy", "foo.foo.baz"]
+      end
     end
   end
   describe 'when compiling a nodes catalog' do
