@@ -60,8 +60,17 @@ module Puppet::Tools
         resource_diffs = {}
         @title_diffs[:both].each do |title|
           unless @new_hash[title] == @old_hash[title]
-            resource_diffs[title]={:old => @old_hash[title],
-                                   :new => @new_hash[title]} 
+            hash1 = {}
+            hash2 = {}
+            @old_hash[title].each do |k, v|
+              unless v == @new_hash[title][k]
+              puts "#{k}|#{v}"
+                hash1[k] = v
+                hash2[k] = @new_hash[title][k]
+              end
+            end
+            resource_diffs[title]={:old => hash1,
+                                   :new => hash2} 
           end
         end
         resource_diffs
