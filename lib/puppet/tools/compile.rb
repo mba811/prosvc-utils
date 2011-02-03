@@ -65,9 +65,13 @@ module Puppet::Tools
   
     # iterate though all of the facts in yamldir and use them
     # to compile catalogs from nodes
-    def get_all_nodes(type, yamldir=Puppet[:yamldir])
-      Dir[File.join(yamldir, "#{type}/*.yaml")].collect do |fn| 
-        node_name = File.basename(fn, '.yaml')
+    def get_all_nodes(type, yamldir=Puppet[:yamldir], format='yaml')
+      match_nodes('*', type, yamldir, format)
+    end
+
+    def match_nodes(match, type, yamldir=Puppet[:yamldir], format='yaml')
+      Dir[File.join(yamldir, "#{type}/#{match}.#{format}")].collect do |fn| 
+        node_name = File.basename(fn, ".#{format}")
       end
     end
 
