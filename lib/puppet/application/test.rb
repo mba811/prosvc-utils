@@ -22,13 +22,14 @@
 #
 
 require 'puppet/application'
+require 'puppet/interface'
 require 'puppet/tools/compile'
 require 'puppet/tools/catalog'
 require 'find'
 
 class Puppet::Application::Test < Puppet::Application
   include Puppet::Tools::Compile
-  include Puppet::Tools::Catalog
+#  include Puppet::Tools::Catalog
   should_parse_config
   # TODO what does this do?
   run_mode :master
@@ -100,7 +101,7 @@ This is used to compile catalogs for testing (maybe for other reasons later)
       :factnode => 'testnode',
       # tests from yaml
       :test_nodes => nil,
-      :node_type => 'node',
+      #:node_type => 'node',
       # puppet related config
       :modulepath => nil,
       # set log levels
@@ -133,10 +134,10 @@ This is used to compile catalogs for testing (maybe for other reasons later)
       options[:test_nodes] = args.split(',').collect
     end
   end
-  option('--node_type TYPE') do |args|
-    raise Puppet::ArgumentError unless args =~ /(node|facts)/
-    options[:node_type]=args
-  end
+#  option('--node_type TYPE') do |args|
+#    raise Puppet::ArgumentError unless args =~ /(node|facts)/
+#    options[:node_type]=args
+#  end
 
   option('--modulepath MP') do |args|
     options[:modulepath]=args
@@ -195,27 +196,74 @@ This is used to compile catalogs for testing (maybe for other reasons later)
       exit_code = 1 if size > 0
     end
     if options[:compile_tests]
-      testnames = compile_tests
-      Puppet.debug "Compile test results: #{testnames.compact.inspect}"
-      exit_code = 1 if testnames.include?(nil)
-      if options[:run_noop]
-        statuses = noop_tests(testnames.compact)
-        exit_code = 1 if statuses.include?('failed')
-      end  
+      exit_code = compile_tests(@modulepath, options[:run_noop]).include?(false) ? 0 : 1
     end
     # creates nodes based on the serialized facts.
     if options[:test_nodes]
       node_list=nil
-      if options[:test_nodes] == :all
-        node_list = get_all_nodes(options[:node_type])
+      if options[:test_nodes] == :all 
+        node_list = get_all_nodes('node')
       else
-        node_list = match_nodes(options[:test_nodes], options[:node_type])
+        node_list = match_nodes(options[:test_nodes], 'node')
       end
       node_list.each do |node|
-        compile_loaded_node(node, options[:outputdir])
+        Puppet['node_terminus'] = 'yaml'
+        compile(node, options[:run_noop], {})
       end
     end
     exit(exit_code)
+  end
+
+  def compile_tests(modulepath, run_noop=false)
+    # TODO - I should be able to pick any fact cache
+    testfiles = get_tests(modulepath)
+    testfiles.collect do |manifest|
+      node_name = 'foo'
+      Puppet[:manifest]=manifest
+      compile(manifest.gsub('/', '-'), run_noop)
+    end
+  end
+
+
+  def compile(node_name, run_noop, opts={})
+    # NOTE - this does not work with environments
+    interface = Puppet::Interface.interface(:catalog).new(opts)
+    begin 
+      catalog = interface.find(node_name)
+    rescue
+      Puppet.warning("Node #{node_name} could not compile")
+      return false
+    end
+    Puppet.debug "Compile test results: #{catalog.render(:pson)}"
+    if run_noop
+      return false if noop_run(catalog) == 'failed'
+    end
+  end
+
+  # iterates through testnames, and applies catalogs in outputdir
+  # in noop mode
+  # TODO - filter out catalogs that have execs with onlyif,unless
+  # returns the status of each run
+  def noop_tests(testnames)
+    testnames.collect do |catalogfile|
+      catalog = load_catalog(catalogfile, 'pson')
+      noop_run(catalog)
+    end
+  end
+
+  def noop_run(catalog)
+    catalog = catalog.to_ral
+    Puppet[:noop] = true
+    require 'puppet/configurer'
+    configurer = Puppet::Configurer.new
+    begin
+      Puppet[:pluginsync] = false
+      status = configurer.run( :catalog => catalog)
+      'foo'
+    rescue
+      Puppet.err("Exception when noop running catalog #{$!}")
+      'failed'
+    end
   end
 
   # for all modules in the modulepath, returns a list of manifests that
@@ -227,6 +275,7 @@ This is used to compile catalogs for testing (maybe for other reasons later)
     modulepath.split(':').each do |path|
       path.gsub!(/\/$/, '')
       Puppet.info("Checking tests for modulepath: #{path}")
+      # TODO - this does not find symlinks
       Find.find(path) do |file|
         if file =~ /#{path}\/(\S+)\/tests\/(\S+.pp)$/
           tests.push "#{$1}-#{$2.gsub('/', '-')}"
@@ -238,72 +287,20 @@ This is used to compile catalogs for testing (maybe for other reasons later)
     manifests - tests
   end
 
-  def compile_tests
-    # get a single facts cache
-    # convert all tests into Puppet[:node]
-    # with unique node per test
-    # NOTE - this does not work with environments
-    testnames=build_fake_manifest(@modulepath)
-    # iterate though all of the node names that present the tests
-    testnames.collect do |node_name|
-      compile_new_node(node_name, options[:factnode], options[:outputdir])
-    end
-  end
-
-  # iterates through testnames, and applies catalogs in outputdir
-  # in noop mode
-  # TODO - filter out catalogs that have execs with onlyif,unless
-  # returns the status of each run
-  def noop_tests(testnames)
-    testnames.collect do |catalogfile|
-      catalog = load_catalog(catalogfile, 'pson')
-      catalog = catalog.to_ral
-      Puppet[:noop] = true
-
-      require 'puppet/configurer'
-      configurer = Puppet::Configurer.new
-      begin
-        #status = configurer.run(:skip_plugin_download => true, :catalog => catalog).status
-        #Puppet.info("#{catalogfile} nooo apply result: #{status} ")
-        Puppet[:pluginsync] = false
-        status = configurer.run( :catalog => catalog)
-        'foo'
-      rescue
-        Puppet.err("Exception when noop running catalog #{$!}")
-        'failed'
-      end
-    end
-  end
-
   # Iterate though all tests in modulepath
-  # converts them to sequential node declarations
-  # sets this to be Puppet[:code] 
-  # the intention is to have a simple program
-  # that can compile all tests as quickly as possible
-  def build_fake_manifest(modulepath)
-    # I shoud make this an instance)
+  # set them as manifest and compile catalog
+  def get_tests(modulepath)
     nodes=[]
-    code = ''
     modulepath.split(':').each do |path|
       path.gsub!(/\/$/, '')
       Puppet.info("Compiling tests from modulepath: #{path}")
       Find.find(path) do |file|
-        if file =~ /#{path}\/(\S+)\/tests\/(\S+\.pp)$/
-          # put ever test in a sequential node declaration
-          # accumulate in code string
-          testname="#{$1}-#{$2.gsub('/', '-')}"
-          nodes.push(testname)
-          code << "node '#{testname}' {\n"
-          File.readlines(file).each do |line|
-            code << " #{line}\n"
-          end
-          code << "}\n"
+        if file =~ /#{path}\/(\S+)\/tests\/.*pp$/
+          # 
+          nodes.push(file)
         end
       end
     end
-    # set all of the code as puppet's code
-    Puppet[:code]=code
-    Puppet.debug(Puppet[:code])
     nodes
   end
 end
