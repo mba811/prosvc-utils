@@ -27,7 +27,7 @@ module Puppet::Tools
     #
     class Diff
       attr_reader :old_hash, :new_hash, 
-                  :title_diffs, :resource_diffs
+                  :title_diffs, :resource_diffs, :edge_diffs
       include Puppet::Tools::Catalog
 
       def initialize(old, new, options = {})
@@ -35,17 +35,20 @@ module Puppet::Tools
         @old_catalog = old
         @new_catalog = new
 
-        # convert the resources into hashes
-        @old_hash = get_resources(old, :to_ral => @to_ral)
-        @new_hash = get_resources(new, :to_ral => @to_ral)
-
+        # convert the catalogs 
+        @old_catalog = transform_catalog(old, :to_ral => @to_ral)
+        @new_catalog = transform_catalog(new, :to_ral => @to_ral)
+        
         # get the differences
-        @title_diffs = get_title_diffs(@old_hash.keys, @new_hash.keys)
+        @title_diffs = get_array_diffs(@old_catalog[:resources].keys,
+                                       @new_catalog[:resources].keys) 
         @resource_diffs = get_resource_differences
+        #@resource_diffs = {}
+        @edge_diffs = get_array_diffs(@old_catalog[:edges], @new_catalog[:edges])
       end
 
       # returns a hash with titles only in new, old, and both
-      def get_title_diffs(old_titles, new_titles)
+      def get_array_diffs(old_titles, new_titles)
         {
           :new => new_titles - old_titles,
           :old => old_titles - new_titles,
@@ -58,15 +61,21 @@ module Puppet::Tools
       # {title => {:old => params, :new => params}}
       def get_resource_differences
         resource_diffs = {}
+        #require 'ruby-debug';debugger
+        new_hash = @new_catalog[:resources]
+        old_hash = @old_catalog[:resources]
         @title_diffs[:both].each do |title|
-          unless @new_hash[title] == @old_hash[title]
+          old_params = old_hash[title].to_hash
+          new_params = new_hash[title].to_hash
+          unless new_params == old_params
             hash1 = {}
             hash2 = {}
-            @old_hash[title].each do |k, v|
-              unless v == @new_hash[title][k]
+            old_params.each do |k, v|
+              #require 'ruby-debug';debugger
+              unless v == new_params[k]
               puts "#{k}|#{v}"
                 hash1[k] = v
-                hash2[k] = @new_hash[title][k]
+                hash2[k] = new_params[k]
               end
             end
             resource_diffs[title]={:old => hash1,
@@ -80,6 +89,7 @@ module Puppet::Tools
       def count_diffs
         diff_counter = 0
         title_count = @title_diffs[:new].size + @title_diffs[:old].size
+        edge_count = @edge_diffs[:new].size + @edge_diffs[:old].size
         title_count + @resource_diffs.size
       end
 
@@ -87,12 +97,11 @@ module Puppet::Tools
       # only contained in one of the two catalogs
       def get_title_diff_array
         titles = ['old', 'new'].collect do |name|
-          unique_strings = []
-          unique_strings.push("The following are only in #{name} catalog") 
+          unique_strings = ["The following are only in #{name} catalog"]
           titles = @title_diffs[name.to_sym]
           unless titles.empty?
             titles.each do |title|
-              unique_strings.push "  - #{title[0]}[#{title[1]}]"
+              unique_strings.push "  - #{title}"
             end
           end
           unique_strings
@@ -107,9 +116,9 @@ module Puppet::Tools
           str << format_diff(title_diffs[0], title_diffs[1])
           str << "\n"
           @resource_diffs.each do |k,v|
-            a1 = gather_resource_string(k[0], k[1], v[:old])
+            a1 = gather_resource_string(k, v[:old])
             a1.unshift('Old Resource:')
-            a2 = gather_resource_string(k[0], k[1], v[:new])
+            a2 = gather_resource_string(k, v[:new])
             a2.unshift('New Resource:')
             str << format_diff(a1, a2)
           end
@@ -156,6 +165,40 @@ module Puppet::Tools
       end
       resource_hash
     end
+
+    def transform_catalog(catalog, options = {})
+      catalog = transform_25(catalog)
+      if options[:to_ral]
+        catalog = catalog.to_ral.relationship_graph
+      end
+      # transform vertices into resources hases ()
+      resource_hash = {}
+      catalog.vertices.each do |v|
+        resource_hash[v.to_s] = v
+      end
+      # convert to strings (this will make it easier to compare)
+      edges = catalog.edges.collect do |edge| edge.to_s end
+      {:edges => edges, :resources => resource_hash}
+    end
+
+    # transform 0.25.5 catalogs into 2.6.x 
+    def transform_25(catalog)
+      is_25 = false
+      catalog.resources.each do |r|
+        unless r.title
+          # this is for 0.25 catalogs, this is ghetto,
+          # but I think it needs to be...
+          is_25 = true
+          type = r.instance_variable_get(:@reference).type
+          title = r.instance_variable_get(:@reference).title
+          r.instance_variable_set(:@type, type)
+          r.instance_variable_set(:@title, title)
+        end
+      end
+      Puppet.notice('converting 0.25.x catalog') if is_25
+      catalog
+    end
+
 
     # takes 2 Puppet::Resource:Catlog and returns
     # 1 Puppet::Tools::Catalog::Diff
@@ -233,7 +276,15 @@ module Puppet::Tools
     end
 
     # converts a resource into a array of strings
-    def gather_resource_string(type, title, params)
+    def gather_resource_string(type_title, params)
+      type, title = nil
+      if type_title =~ /^([-\w:]+)\[(.*)\]$/m
+        type = $1
+        title = $2
+      else
+        raise Puppet::Error, "Invalid resource id: #{type_title}"
+      end
+
       array = []
       array.push "  " + type.downcase + '{"' +  title + '":'
       params.each_pair do |k,v|

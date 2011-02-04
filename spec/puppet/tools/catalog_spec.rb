@@ -61,7 +61,7 @@ describe 'Puppet::Tools::Catalog' do
 
   describe 'when getting a catlogs resources' do
     it 'should not return containers' do
-      resources = get_resources(@catalog, :to_ral => true) 
+      resources = transform_catalogs(@catalog, :to_ral => true) 
       resources[["Notify", "name"]][:name].should == "name"
       resources[["Notify", "bar"]][:name].should == "bar"
       resources[["Node", "default"]].should be_nil
@@ -103,14 +103,14 @@ class { foo: foo => {foo => bar, bar => bazzer}}'
       cat1 = code_to_catalog(code1, 'node1')  
       cat2 = code_to_catalog(code2, 'node2')  
       diff = get_catalog_diffs(cat1, cat2, :to_ral => true)
-      diff.title_diffs[:old].should == [['File', '/tmp/foo']]
-      diff.title_diffs[:new].should == [['Service', 'foo']]
-      diff.title_diffs[:both].should == [['Notify', 'bar']]
+      diff.title_diffs[:old].should == ['File[/tmp/foo]']
+      diff.title_diffs[:new].should == ['Service[foo]']
+      diff.title_diffs[:both].should == ['Notify[bar]']
       # I would rather use =~, but it fails if they are ==
-      diff.resource_diffs[["Notify", "bar"]][:old].should ==
-           {:name=>"bar", :message=>"baz", :withpath=>:false, :loglevel=>:notice}
-      diff.resource_diffs[["Notify", "bar"]][:new].should ==
-           {:name=>"bar", :message=>"baz2", :withpath=>:false, :loglevel=>:notice}
+      diff.resource_diffs["Notify[bar]"][:old].should ==
+           {:message=>"baz"}
+      diff.resource_diffs["Notify[bar]"][:new].should ==
+           {:message=>"baz2"}
       diff.count_diffs.should == 3
       diff.get_title_diff_array.should ==
         [["The following are only in old catalog", "  - File[/tmp/foo]"],
@@ -121,14 +121,42 @@ The following are only in old catalog | The following are only in new catalog
   - File[/tmp/foo]                    |   - Service[foo]
 
 -------
-Old Resource:           | New Resource:
-  notify{"bar":         |   notify{"bar":
-     name => bar        |      name => bar
-     message => baz     |      message => baz2
-     withpath => false  |      withpath => false
-     loglevel => notice |      loglevel => notice
-  }                     |   }
+Old Resource:       | New Resource:
+  notify{"bar":     |   notify{"bar":
+     message => baz |      message => baz2
+  }                 |   }
 '
+    end
+    it 'should only check resource diffs when to_ral' do
+
+      @dep_code1 = <<EOF
+class foo1 {
+  notify{one:}
+}
+class foo2 {
+  Class[foo2]->Class[foo1]
+  notify{two:}
+}
+class{[foo1, foo2]:}
+EOF
+      @dep_code2 = <<EOF
+notify{one:
+  before => Notify[two]
+}
+notify{two:}
+EOF
+      code1 = @dep_code1
+      code2 = @dep_code1
+      cat1 = code_to_catalog(code1, 'node1')  
+      cat2 = code_to_catalog(code2, 'node2')  
+      diff = get_catalog_diffs(cat1, cat2, :to_ral => true)
+      diff.title_diffs[:new].should == []
+      diff.title_diffs[:old].should == []
+      diff.title_diffs[:both].should =~ ['Notify[one]', 'Notify[two]']
+      diff.edge_diffs[:new].should == []
+      diff.edge_diffs[:old].should == []
+      diff.edge_diffs[:both].should =~ ['Notify[two] => Notify[one]']
+      diff.resource_diffs.should == {}
     end
 
     it 'should print all resource diffs' do
